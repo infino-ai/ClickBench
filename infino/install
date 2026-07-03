@@ -1,7 +1,15 @@
 #!/bin/bash
 set -e
 
-# Build the Rust benchmark binary (depends on the infino crate from crates.io).
+BIN=bench/target/release/clickbench-infino
+
+# Use a prebuilt binary if one was copied in (e.g. built on a CI runner and
+# scp'd over); otherwise build it here (depends on the infino crate from crates.io).
+if [ -x "$BIN" ]; then
+    echo "using prebuilt $BIN"
+    exit 0
+fi
+
 if ! command -v cargo >/dev/null 2>&1; then
     curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
     # shellcheck disable=SC1091

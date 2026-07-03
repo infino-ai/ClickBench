@@ -1,0 +1,5 @@
+#!/bin/bash
+# Reads a SQL query from stdin, runs it via infino.
+# Stdout: row count. Stderr: query runtime in fractional seconds (last line).
+set -e
+exec ./bench/target/release/clickbench-infino query

@@ -14,6 +14,14 @@ set -e
 QUERIES="${BENCH_QUERIES_FILE:-queries.sql}"
 TRIES="${BENCH_TRIES:-3}"
 
+# Attach a persistent disk cache so queries range-read only the projected
+# columns (t1 fills it, t2/t3 hit the mmap) instead of the tier-3
+# whole-superfile read. Exported so the per-query ./query child inherits it.
+# Set BENCH_NO_CACHE=1 to leave it unset and measure the no-cache baseline.
+if [ -z "${BENCH_NO_CACHE:-}" ]; then
+    export INFINO_CACHE_DIR="${INFINO_CACHE_DIR:-./cache}"
+fi
+
 : > result.csv
 printf "%-4s %12s %12s %12s %12s\n" Q cold t2 t3 hot
 

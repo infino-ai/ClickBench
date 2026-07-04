@@ -154,7 +154,10 @@ fn load() -> R<()> {
 /// of one large file plus small leftovers. min_fill_percent is dropped to 1 so
 /// a one-shot optimize actually merges the small tail rather than leaving it.
 fn optimize_options() -> OptimizeOptions {
-    match env::var("INFINO_TARGET_SF_MB").ok().and_then(|s| s.parse::<u64>().ok()) {
+    match env::var("INFINO_TARGET_SF_MB")
+        .ok()
+        .and_then(|s| s.parse::<u64>().ok())
+    {
         Some(mb) => OptimizeOptions::compact(CompactionSettings {
             target_superfile_size_mb: mb,
             min_fill_percent: 1,
@@ -167,13 +170,31 @@ fn optimize_options() -> OptimizeOptions {
 fn query() -> R<()> {
     let mut sql = String::new();
     std::io::stdin().read_to_string(&mut sql)?;
+    // Open once, then run the query INFINO_QUERY_TRIES times in this one
+    // process: try 1 is cold (page cache dropped, connection just opened),
+    // tries 2/3 reuse the warm connection — matching how ClickBench keeps a
+    // warm server across a query's tries. One elapsed line per try on stderr;
+    // row count on stdout. (Own env var, not BENCH_TRIES, so the shared
+    // ClickBench driver — which loops ./query itself — still sees one try.)
+    let tries: usize = env::var("INFINO_QUERY_TRIES")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .filter(|&n| n > 0)
+        .unwrap_or(1);
+
     let db = open()?;
-    let start = Instant::now();
-    let batches = db.query_sql(&sql)?;
-    let elapsed = start.elapsed().as_secs_f64();
-    let rows: usize = batches.iter().map(|b| b.num_rows()).sum();
+
+    let mut rows = 0;
+
+    for _ in 0..tries {
+        let start = Instant::now();
+        let batches = db.query_sql(&sql)?;
+        rows = batches.iter().map(|b| b.num_rows()).sum();
+        eprintln!("{:.6}", start.elapsed().as_secs_f64());
+    }
+
     println!("{rows} rows");
-    eprintln!("{elapsed:.6}");
+
     Ok(())
 }
 

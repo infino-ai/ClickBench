@@ -48,6 +48,18 @@ fn open() -> R<infino::Connection> {
         opts = opts.with_cache_dir(dir);
         custom = true;
     }
+
+    // Raise the disk-cache budget above the 10 GiB default so a large corpus
+    // (e.g. 100M rows, tens of GB of superfiles) fits on a big disk instead of
+    // thrashing / falling back to range-only reads. Bytes.
+    if let Ok(b) = env::var("INFINO_CACHE_BUDGET")
+        .ok()
+        .and_then(|s| s.parse::<u64>().ok())
+    {
+        opts = opts.with_cache_budget_bytes(b);
+        custom = true;
+    }
+
     Ok(if custom {
         connect_with(uri(), opts)?
     } else {

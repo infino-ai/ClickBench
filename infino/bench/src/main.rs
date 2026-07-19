@@ -174,6 +174,7 @@ fn optimize_options() -> OptimizeOptions {
             target_superfile_size_mb: mb,
             min_fill_percent: 1,
             max_memory_mb: mb + 2048,
+            ..Default::default()
         }),
         None => OptimizeOptions::default(),
     }

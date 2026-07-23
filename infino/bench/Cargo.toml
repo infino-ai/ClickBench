@@ -9,10 +9,10 @@ path = "src/main.rs"
 
 [dependencies]
 infino = "0.1.2"
-arrow = "58"
-arrow-array = "58"
-arrow-schema = "58"
-parquet = "58"
+arrow = "59"
+arrow-array = "59"
+arrow-schema = "59"
+parquet = "59"
 glob = "0.3"
 
 [profile.release]

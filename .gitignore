@@ -14,17 +14,23 @@ server.log
 server.pid
 server.endpoint
 server.endpoint.tmp
+hyperd.log
 arc_token.txt
 data-size.txt
 .doris_home
 .sirius_env
+create.rewritten.sql
 
 # Per-system data files
 hits.db
 mydb
-hits.hyper
+hits*.hyper
 hits.vortex
 *.vortex
 
+# BemiDB single binary and local Iceberg storage
+bemidb/bemidb
+bemidb/iceberg
+
 # Python venvs created by install scripts
-myenv/
+myenv

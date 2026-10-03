@@ -30,7 +30,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use arrow::compute::cast;
+use arrow::compute::{cast, concat_batches};
 use arrow_array::RecordBatch;
 use arrow_schema::{DataType, Field, Schema, SchemaRef};
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
@@ -160,7 +160,20 @@ fn load() -> R<()> {
     }
     let table = db.create_table("hits", target.clone(), IndexSpec::new())?;
 
+    // Hydrate append granularity. 0 / unset = append each parquet batch as it
+    // arrives (natural shape: ~1 superfile per 1M-row partition, ~100 at 100M).
+    // Set INFINO_HYDRATE_APPEND_ROWS=N to buffer N rows per append so superfiles
+    // land larger (~2.5M rows ~= 256 MB -> ~40 files at 100M, matching the
+    // optimize baseline's end state) with no optimize pass. split (./infino.yaml)
+    // still caps a single append at its max size.
+    let append_rows: usize = env::var("INFINO_HYDRATE_APPEND_ROWS")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(0);
+
     let mut appended: usize = 0;
+    let mut buf: Vec<RecordBatch> = Vec::new();
+    let mut buf_rows: usize = 0;
     'files: for path in &files {
         let reader = ParquetRecordBatchReaderBuilder::try_new(File::open(path)?)?
             .with_batch_size(BATCH_ROWS)
@@ -176,12 +189,27 @@ fn load() -> R<()> {
             if n == 0 {
                 continue;
             }
-            table.append(&cast_batch(&batch, &target)?)?;
+            let cast = cast_batch(&batch, &target)?;
+            if append_rows == 0 {
+                table.append(&cast)?;
+            } else {
+                buf.push(cast);
+                buf_rows += n;
+                if buf_rows >= append_rows {
+                    table.append(&concat_batches(&target, &buf)?)?;
+                    buf.clear();
+                    buf_rows = 0;
+                }
+            }
             appended += n;
             if max_rows.is_some_and(|max| appended >= max) {
                 break 'files;
             }
         }
+    }
+    // Flush the final partial buffer (batching mode only).
+    if !buf.is_empty() {
+        table.append(&concat_batches(&target, &buf)?)?;
     }
 
     // Hydrate: skip compaction entirely. The parquet lands as its append-time

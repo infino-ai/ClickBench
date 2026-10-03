@@ -153,9 +153,10 @@ fn load() -> R<()> {
         }
     }
 
-    // Compact per-batch superfiles into fewer, uniform segments. Part of the
-    // honest load cost.
-    table.optimize(&optimize_options())?;
+    // Hydrate: skip compaction entirely. The parquet lands as its append-time
+    // segments and pays no optimize pass, which is the whole point. The baseline
+    // that compacts is the `add-infino` branch, run as the A side of the A/B.
+    println!("hydrate: skipped optimize");
     println!("ingested {appended} rows");
     Ok(())
 }
@@ -165,6 +166,7 @@ fn load() -> R<()> {
 /// on an 8-core box yields several balanced segments for parallel scan instead
 /// of one large file plus small leftovers. min_fill_percent is dropped to 1 so
 /// a one-shot optimize actually merges the small tail rather than leaving it.
+#[allow(dead_code)] // kept so restoring the compaction path for an A/B is a one-line change.
 fn optimize_options() -> OptimizeOptions {
     match env::var("INFINO_TARGET_SF_MB")
         .ok()

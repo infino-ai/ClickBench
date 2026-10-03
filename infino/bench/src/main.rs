@@ -100,6 +100,21 @@ fn cast_batch(batch: &RecordBatch, target: &SchemaRef) -> R<RecordBatch> {
 }
 
 fn load() -> R<()> {
+    // Hydrate: size the superfiles at append so they land at their final size
+    // directly, with no compaction. The engine reads `./infino.yaml` from the
+    // cwd (highest-precedence config source), so write the split there before
+    // the first connect. INFINO_SPLIT_MB overrides; 256 matches the size the
+    // baseline reaches the slow way, via optimize.
+    let split_mb: u64 = env::var("INFINO_SPLIT_MB")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(256);
+    std::fs::write(
+        "./infino.yaml",
+        format!("supertable:\n  superfile_buffer_split_mb: {split_mb}\n"),
+    )?;
+    println!("hydrate: superfile_buffer_split_mb = {split_mb}");
+
     let src = env::var("INFINO_SRC").unwrap_or_else(|_| "hits.parquet".to_string());
     let max_rows: Option<usize> = env::var("INFINO_MAX_ROWS")
         .ok()

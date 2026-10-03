@@ -8,3 +8,4 @@ run.log
 serve.log
 infino.sock
 infino.pid
+infino.yaml

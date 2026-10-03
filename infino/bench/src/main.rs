@@ -115,6 +115,22 @@ fn cast_batch(batch: &RecordBatch, target: &SchemaRef) -> R<RecordBatch> {
 }
 
 fn load() -> R<()> {
+    // Hydrate: size the superfiles at append so they land at their final size
+    // directly, no compaction. The engine reads ./infino.yaml from the cwd
+    // (highest-precedence config), so write the split there before the first
+    // connect. INFINO_SPLIT_MB overrides; 256 matches the size optimize would
+    // reach the slow way. Natural shape: appends are per-partition, so this
+    // yields ~1 superfile per 1M-row partition (~100 at 100M).
+    let split_mb: u64 = env::var("INFINO_SPLIT_MB")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(256);
+    std::fs::write(
+        "./infino.yaml",
+        format!("supertable:\n  superfile_buffer_split_mb: {split_mb}\n"),
+    )?;
+    println!("hydrate: superfile_buffer_split_mb = {split_mb}");
+
     let src = env::var("INFINO_SRC").unwrap_or_else(|_| "hits.parquet".to_string());
     let max_rows: Option<usize> = env::var("INFINO_MAX_ROWS")
         .ok()
@@ -168,9 +184,10 @@ fn load() -> R<()> {
         }
     }
 
-    // Compact per-batch superfiles into fewer, uniform segments. Part of the
-    // honest load cost.
-    table.optimize(&optimize_options())?;
+    // Hydrate: skip compaction entirely. The parquet lands as its append-time
+    // segments and pays no optimize pass, which is the whole point. The baseline
+    // that compacts is the `main` harness, run as the A side of the A/B.
+    println!("hydrate: skipped optimize");
     println!("ingested {appended} rows");
     Ok(())
 }
@@ -180,6 +197,7 @@ fn load() -> R<()> {
 /// on an 8-core box yields several balanced segments for parallel scan instead
 /// of one large file plus small leftovers. min_fill_percent is dropped to 1 so
 /// a one-shot optimize actually merges the small tail rather than leaving it.
+#[allow(dead_code)] // hydrate skips optimize; kept so restoring compaction is a one-line change.
 fn optimize_options() -> OptimizeOptions {
     // Reclaim the files this optimize supersedes instead of leaving them for a later sweep.
     // The cost adds in "load" time.

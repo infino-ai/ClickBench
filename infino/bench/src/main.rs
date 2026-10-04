@@ -30,7 +30,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use arrow::compute::{cast, concat_batches};
+use arrow::compute::cast;
 use arrow_array::RecordBatch;
 use arrow_schema::{DataType, Field, Schema, SchemaRef};
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
@@ -41,8 +41,6 @@ use infino::{
 };
 
 type R<T> = Result<T, Box<dyn Error>>;
-
-const BATCH_ROWS: usize = 1_000_000;
 
 /// Safety gap for the load's own garbage collection.
 const GC_SAFETY_GAP_SECS: u64 = 1;
@@ -115,27 +113,18 @@ fn cast_batch(batch: &RecordBatch, target: &SchemaRef) -> R<RecordBatch> {
 }
 
 fn load() -> R<()> {
-    // Hydrate: size the superfiles at append so they land at their final size
-    // directly, no compaction. The engine reads ./infino.yaml from the cwd
-    // (highest-precedence config), so write the split there before the first
-    // connect. INFINO_SPLIT_MB overrides; 256 matches the size optimize would
-    // reach the slow way. Natural shape: appends are per-partition, so this
-    // yields ~1 superfile per 1M-row partition (~100 at 100M).
-    let split_mb: u64 = env::var("INFINO_SPLIT_MB")
+    // Hydrate: write the parquet straight into a few big superfiles in ONE bulk
+    // commit via the engine's `hydrate` entry — no per-batch append and no
+    // optimize pass. Rows are coalesced into ~INFINO_HYDRATE_TARGET_ROWS-row
+    // superfiles (default 1.8M, ~256 MB each -> ~56 at 100M). Batches stream from
+    // the parquet reader into `hydrate`, so the whole corpus is never resident.
+    let target_rows: usize = env::var("INFINO_HYDRATE_TARGET_ROWS")
         .ok()
         .and_then(|s| s.parse().ok())
-        .unwrap_or(256);
-    std::fs::write(
-        "./infino.yaml",
-        format!("supertable:\n  superfile_buffer_split_mb: {split_mb}\n"),
-    )?;
-    println!("hydrate: superfile_buffer_split_mb = {split_mb}");
+        .filter(|&n| n > 0)
+        .unwrap_or(1_800_000);
 
     let src = env::var("INFINO_SRC").unwrap_or_else(|_| "hits.parquet".to_string());
-    let max_rows: Option<usize> = env::var("INFINO_MAX_ROWS")
-        .ok()
-        .and_then(|s| s.parse().ok())
-        .filter(|&n| n > 0);
 
     let mut files: Vec<PathBuf> = glob::glob(&src)?.filter_map(Result::ok).collect();
     files.sort();
@@ -143,7 +132,7 @@ fn load() -> R<()> {
         return Err(format!("no parquet files match {src:?}").into());
     }
 
-    // Target schema from the first file's schema.
+    // Target schema from the first file's schema (EventDate -> DATE, Binary -> Utf8).
     let src_schema = ParquetRecordBatchReaderBuilder::try_new(File::open(&files[0])?)?
         .schema()
         .clone();
@@ -160,63 +149,59 @@ fn load() -> R<()> {
     }
     let table = db.create_table("hits", target.clone(), IndexSpec::new())?;
 
-    // Hydrate append granularity. 0 / unset = append each parquet batch as it
-    // arrives (natural shape: ~1 superfile per 1M-row partition, ~100 at 100M).
-    // Set INFINO_HYDRATE_APPEND_ROWS=N to buffer N rows per append so superfiles
-    // land larger (~2.5M rows ~= 256 MB -> ~40 files at 100M, matching the
-    // optimize baseline's end state) with no optimize pass. split (./infino.yaml)
-    // still caps a single append at its max size.
-    let append_rows: usize = env::var("INFINO_HYDRATE_APPEND_ROWS")
-        .ok()
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(0);
-
-    let mut appended: usize = 0;
-    let mut buf: Vec<RecordBatch> = Vec::new();
-    let mut buf_rows: usize = 0;
-    'files: for path in &files {
-        let reader = ParquetRecordBatchReaderBuilder::try_new(File::open(path)?)?
-            .with_batch_size(BATCH_ROWS)
-            .build()?;
-        for batch in reader {
-            let mut batch = batch?;
-            if let Some(max) = max_rows {
-                if appended + batch.num_rows() > max {
-                    batch = batch.slice(0, max - appended);
+    // Parallel decode: split each file's row groups across threads, each
+    // decoding + casting concurrently into a bounded channel. A single
+    // sequential reader decodes the 14 GB parquet at ~208 s (the load
+    // bottleneck); fanning the row groups across cores removes it. hydrate
+    // consumes the channel and builds superfiles in parallel on its side.
+    // INFINO_MAX_ROWS is not applied on this path — the bench loads the full file.
+    let n_dec: usize = std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(8);
+    // Small bounded channel + small decode batches keep the parallel decode's
+    // in-flight Arrow memory low (the big 10 GB output accumulation was moved to
+    // per-wave commits engine-side; keep the decode side modest too).
+    const DECODE_BATCH_ROWS: usize = 256_000;
+    let (tx, rx) = std::sync::mpsc::sync_channel::<RecordBatch>(4);
+    let mut handles = Vec::new();
+    for path in files {
+        let num_rg = ParquetRecordBatchReaderBuilder::try_new(File::open(&path)?)?
+            .metadata()
+            .num_row_groups();
+        let per = num_rg.div_ceil(n_dec).max(1);
+        let mut start = 0;
+        while start < num_rg {
+            let rgs: Vec<usize> = (start..(start + per).min(num_rg)).collect();
+            start += per;
+            let tx = tx.clone();
+            let path = path.clone();
+            let target = target.clone();
+            handles.push(std::thread::spawn(move || {
+                let reader = ParquetRecordBatchReaderBuilder::try_new(
+                    File::open(&path).expect("open parquet"),
+                )
+                .expect("parquet reader builder")
+                .with_row_groups(rgs)
+                .with_batch_size(DECODE_BATCH_ROWS)
+                .build()
+                .expect("parquet reader");
+                for b in reader {
+                    let b = b.expect("decode parquet batch");
+                    let c = cast_batch(&b, &target).expect("cast batch");
+                    if tx.send(c).is_err() {
+                        break;
+                    }
                 }
-            }
-            let n = batch.num_rows();
-            if n == 0 {
-                continue;
-            }
-            let cast = cast_batch(&batch, &target)?;
-            if append_rows == 0 {
-                table.append(&cast)?;
-            } else {
-                buf.push(cast);
-                buf_rows += n;
-                if buf_rows >= append_rows {
-                    table.append(&concat_batches(&target, &buf)?)?;
-                    buf.clear();
-                    buf_rows = 0;
-                }
-            }
-            appended += n;
-            if max_rows.is_some_and(|max| appended >= max) {
-                break 'files;
-            }
+            }));
         }
     }
-    // Flush the final partial buffer (batching mode only).
-    if !buf.is_empty() {
-        table.append(&concat_batches(&target, &buf)?)?;
-    }
+    drop(tx); // only the decode threads hold senders now
 
-    // Hydrate: skip compaction entirely. The parquet lands as its append-time
-    // segments and pays no optimize pass, which is the whole point. The baseline
-    // that compacts is the `main` harness, run as the A side of the A/B.
-    println!("hydrate: skipped optimize");
-    println!("ingested {appended} rows");
+    let committed = table.hydrate(rx, target_rows)?;
+    for h in handles {
+        let _ = h.join();
+    }
+    println!("hydrate: committed {committed} rows (target_rows={target_rows}, no optimize)");
     Ok(())
 }
 

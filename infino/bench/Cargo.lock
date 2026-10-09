@@ -1618,12 +1618,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "fst"
-version = "0.4.7"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7ab85b9b05e3978cc9a9cf8fea7f01b494e1a09ed3037e16ba39edc7a29eb61a"
-
-[[package]]
 name = "futures"
 version = "0.3.33"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2106,8 +2100,7 @@ dependencies = [
 [[package]]
 name = "infino"
 version = "0.11.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "954ffb7c01169c71840b6bd42527499ec7cf40a9afe82560ea7447df14704016"
+source = "git+https://github.com/naman-modi/infino?rev=fa87933258f9655d09859eed979c6543ec85e1d4#fa87933258f9655d09859eed979c6543ec85e1d4"
 dependencies = [
  "apache-avro",
  "arc-swap",
@@ -2128,7 +2121,6 @@ dependencies = [
  "ferroid",
  "figment",
  "fs4",
- "fst",
  "futures",
  "hashbrown 0.17.1",
  "libmimalloc-sys",

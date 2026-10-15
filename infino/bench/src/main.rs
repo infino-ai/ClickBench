@@ -270,10 +270,13 @@ impl RecordBatchReader for Decoded {
 }
 
 /// Daemon: open the table once and answer queries on a unix socket, one query
-/// per connection, serially (the ClickBench sweep is serial). Holding the table
-/// open for the life of the process is the whole point: the shared driver keeps
-/// the server running across a query's warm tries (2 and 3), so they reuse this
+/// per connection, each connection on its own thread. Holding the table open
+/// for the life of the process is the whole point: the shared driver keeps the
+/// server running across a query's warm tries (2 and 3), so they reuse this
 /// handle and its caches, exactly as it does for ClickHouse and other daemons.
+/// The main sweep sends one query at a time; the concurrent-QPS test that
+/// follows it opens several connections at once, and they all share this one
+/// connection (a clone is one `Arc`) and its caches.
 ///
 /// A per-connection failure (client hung up, broken pipe, a stop/start race)
 /// must never take the server down mid-sweep — that would fail every later
@@ -288,9 +291,12 @@ fn serve() -> R<()> {
     for stream in listener.incoming() {
         match stream {
             Ok(stream) => {
-                if let Err(e) = handle_conn(&db, stream) {
-                    eprintln!("connection error: {e}");
-                }
+                let db = db.clone();
+                thread::spawn(move || {
+                    if let Err(e) = handle_conn(&db, stream) {
+                        eprintln!("connection error: {e}");
+                    }
+                });
             }
             Err(e) => eprintln!("accept error: {e}"),
         }
@@ -305,7 +311,7 @@ fn serve() -> R<()> {
 ///   `ERR <message>`                                        on failure
 /// The client sends the SQL then half-closes its write side; that EOF is what
 /// lets `read_to_string` return. The read timeout bounds a client that never
-/// does, so one stuck caller cannot wedge the single-threaded server.
+/// does, so one stuck caller cannot hold its thread forever.
 ///
 /// Timing wraps `query_sql` only: the result is formatted AFTER `elapsed()`, so
 /// the reported seconds stay pure query latency (unchanged from before). We
